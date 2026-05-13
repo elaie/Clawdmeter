@@ -14,13 +14,13 @@ venv, deps, board discovery, and first run for you:
 
 > Set up the Clawdmeter daemon in `daemon/`. Create a Python venv inside
 > `daemon/.venv`, install `daemon/requirements.txt` into it, then run
-> `python discover.py --probe` to verify the ESP32 is reachable on the LAN.
-> If a device is found, copy `config.example.json` to `config.json` (only
-> if it doesn't already exist), set `esp32_name` to the discovered
-> device's name, and start the daemon with `python clawdmeter_daemon.py -v`
-> in the background. Show me the first payload it posts so I can confirm
-> end-to-end. If discovery returns nothing, stop and tell me — the board
-> is probably offline.
+> `python discover.py --device stephan --probe` to verify the board named
+> **stephan** is reachable on the LAN. If it's found, copy
+> `config.example.json` to `config.json` (only if it doesn't already
+> exist), set `esp32_name` to `"stephan"`, and start the daemon with
+> `python clawdmeter_daemon.py -v` in the background. Show me the first
+> payload it posts so I can confirm end-to-end. If discovery returns
+> nothing, stop and tell me — the board is probably offline.
 
 It'll also nudge you to `claude /login` if your credentials aren't where
 the daemon expects them.
