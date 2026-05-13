@@ -14,3 +14,9 @@ tools/package-lock.json
 
 # Local WiFi credentials — see firmware/src/secrets.example.h
 firmware/src/secrets.h
+
+# Python daemon
+daemon/.venv/
+daemon/__pycache__/
+daemon/config.json
+*.pyc
