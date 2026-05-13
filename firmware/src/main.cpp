@@ -353,6 +353,9 @@ void loop() {
         if (power_pwr_pressed()) {
             ui_toggle_splash();
         }
+        if (power_pwr_long_pressed()) {
+            power_shutdown();  // does not return
+        }
     }
 
     handle_rotation_change();

@@ -8,7 +8,8 @@
 
 static int      cached_pct      = -1;
 static bool     cached_charging = false;
-static bool     pwr_pressed_flag = false;
+static bool     pwr_pressed_flag      = false;
+static bool     pwr_long_pressed_flag = false;
 static uint32_t last_battery_ms  = 0;
 static uint32_t last_charging_ms = 0;
 static uint32_t last_pwr_ms      = 0;
@@ -24,10 +25,16 @@ void power_init(void) {
     pmu.enableBattDetection();
     pmu.enableBattVoltageMeasure();
 
-    // Enable PWR button short-press IRQ (mid button for cycling screens)
+    // Configure PWR button IRQs:
+    //   short-press → toggle splash (main.cpp)
+    //   long-press  → graceful shutdown via power_shutdown()
+    // LONG_IRQ fires at the AXP2101's built-in long-press threshold (~1.5s,
+    // not user-configurable). If the user keeps holding past the chip's
+    // hardware power-off threshold (setPowerKeyPressOffTime, default ~6s)
+    // the chip cuts power itself — same end state.
     pmu.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
     pmu.clearIrqStatus();
-    pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ);
+    pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ | XPOWERS_AXP2101_PKEY_LONG_IRQ);
 
     cached_charging = pmu.isCharging();
     cached_pct = pmu.getBatteryPercent();
@@ -46,13 +53,12 @@ void power_tick(void) {
         cached_pct = pmu.getBatteryPercent();
     }
 
-    // Poll PWR button (AXP2101 short-press IRQ)
+    // Poll PWR button (AXP2101 PKEY IRQs)
     if (now - last_pwr_ms >= PWR_POLL_MS) {
         last_pwr_ms = now;
         pmu.getIrqStatus();
-        if (pmu.isPekeyShortPressIrq()) {
-            pwr_pressed_flag = true;
-        }
+        if (pmu.isPekeyShortPressIrq()) pwr_pressed_flag      = true;
+        if (pmu.isPekeyLongPressIrq())  pwr_long_pressed_flag = true;
         pmu.clearIrqStatus();
     }
 }
@@ -71,4 +77,18 @@ bool power_pwr_pressed(void) {
         return true;
     }
     return false;
+}
+
+bool power_pwr_long_pressed(void) {
+    if (pwr_long_pressed_flag) {
+        pwr_long_pressed_flag = false;
+        return true;
+    }
+    return false;
+}
+
+void power_shutdown(void) {
+    Serial.println("power: shutdown via AXP2101");
+    Serial.flush();
+    pmu.shutdown();
 }
