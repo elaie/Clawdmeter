@@ -4,18 +4,17 @@
 #include "display_cfg.h"
 #include "data.h"
 #include "ui.h"
-#include "ble.h"
+#include "net.h"
 #include "power.h"
 #include "imu.h"
 #include "splash.h"
 #include "usage_rate.h"
 
-// Physical buttons (global, screen-independent):
-//   BTN_BACK   (GPIO 0)  — left,  send Space (Claude Code voice mode push-to-talk)
-//   BTN_FWD    (GPIO 18) — right, send Shift+Tab (Claude Code mode toggle)
-//   AXP PWR    (PMU)     — middle, cycle screens; on splash, cycle animations
-#define BTN_BACK 0
-#define BTN_FWD  18
+// Physical buttons (Waveshare 1.75 has two):
+//   BTN_BOOT  (GPIO 0)   — short press: cycle screens; on splash, next anim.
+//   AXP PWR   (PMU PKEY) — short press: toggle splash on/off.
+//                          long press:  power off (handled in power.cpp).
+#define BTN_BOOT 0
 
 // ---- Hardware objects ----
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -58,8 +57,8 @@ static void touch_read() {
 #define BUF_LINES 40
 static uint16_t *buf1 = nullptr;
 static uint16_t *buf2 = nullptr;
-// rot_buf for strip rotation — max size is 480×480 (full invalidation case)
-// but typical partial strips are much smaller
+// rot_buf for strip rotation — sized for LCD_WIDTH × BUF_LINES (worst case
+// strip after 90°/270° rotation has the same pixel count as before).
 static uint16_t *rot_buf = nullptr;
 
 // LVGL tick callback
@@ -67,13 +66,13 @@ static uint32_t my_tick(void) {
     return millis();
 }
 
-// Rotate a w×h strip and compute destination coordinates on the 480×480 display.
-// src pixels are in row-major order for the rectangle (sx, sy, w, h).
-// Output goes to rot_buf in row-major order for the destination rectangle.
+// Rotate a w×h strip and compute destination coordinates on the LCD_WIDTH ×
+// LCD_HEIGHT display. src pixels are in row-major order for the rectangle
+// (sx, sy, w, h). Output goes to rot_buf in row-major order for the dest.
 static void rotate_strip(const uint16_t *src, int32_t w, int32_t h,
                          int32_t sx, int32_t sy, uint8_t r,
                          int32_t *dx, int32_t *dy, int32_t *dw, int32_t *dh) {
-    const int S = LCD_WIDTH;  // 480
+    const int S = LCD_WIDTH;
 
     switch (r) {
     case 1: { // 90° CW: (x,y) -> (S-1-y, x)
@@ -244,7 +243,7 @@ void setup() {
 
     // Init touch
     touch.setPins(TP_RST, TP_INT);
-    if (!touch.begin(Wire, CST9220_ADDR, IIC_SDA, IIC_SCL)) {
+    if (!touch.begin(Wire, CST9217_ADDR, IIC_SDA, IIC_SCL)) {
         Serial.println("Touch init failed");
     } else {
         touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
@@ -261,8 +260,9 @@ void setup() {
     // Allocate PSRAM-backed partial render buffers
     buf1 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
     buf2 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
-    // rot_buf needs to hold the largest possible strip after rotation
-    // A 480×40 strip rotated 90° becomes 40×480, same pixel count
+    // rot_buf needs to hold the largest possible strip after rotation.
+    // A LCD_WIDTH×BUF_LINES strip rotated 90° becomes BUF_LINES×LCD_WIDTH,
+    // same pixel count.
     rot_buf = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
 
     lv_display_t* disp = lv_display_create(LCD_WIDTH, LCD_HEIGHT);
@@ -278,28 +278,27 @@ void setup() {
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, my_touch_cb);
 
-    // Init BLE data channel
-    ble_init();
+    // Init WiFi STA + HTTP server (POST /usage)
+    net_init();
 
-    // Physical buttons: back (GPIO 0) and forward (GPIO 18)
-    pinMode(BTN_BACK, INPUT_PULLUP);
-    pinMode(BTN_FWD,  INPUT_PULLUP);
+    // Physical button: BOOT (GPIO 0)
+    pinMode(BTN_BOOT, INPUT_PULLUP);
 
     // Build dashboard
     ui_init();
 
-    // Show initial BLE status on Bluetooth screen
-    ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
+    // Show initial WiFi status on Network screen
+    ui_update_net_status(net_get_state(), net_get_ssid(), net_get_ip(), net_get_rssi());
 
     // Show initial battery status
     ui_update_battery(power_battery_pct(), power_is_charging());
 
     ui_show_screen(SCREEN_SPLASH);
 
-    Serial.println("Dashboard ready, waiting for data on BLE...");
+    Serial.println("Dashboard ready, waiting for usage POSTs on WiFi...");
 }
 
-static ble_state_t last_ble_state = BLE_STATE_INIT;
+static net_state_t last_net_state = NET_STATE_DISCONNECTED;
 
 // Brightness ramp state for rotation transition
 // On rotation change we blank the panel, force a full LVGL redraw at the
@@ -334,44 +333,35 @@ void loop() {
     touch_read();
     lv_timer_handler();
     ui_tick_anim();
-    ble_tick();
+    net_tick();
     power_tick();
     imu_tick();
     splash_tick();
 
-    // Three-button input (global, screen-independent):
-    //   LEFT  (GPIO 0)  → Space (voice-mode push-to-talk; press & release tracked)
-    //   RIGHT (GPIO 18) → Shift+Tab (Claude Code mode toggle)
-    //   PWR   (AXP)     → cycle screens; on splash, cycle animations
+    // Two-button input (Waveshare 1.75):
+    //   BTN_BOOT (GPIO 0) → cycle screens; on splash, cycle animations
+    //   AXP PWR  (PMU)    → toggle splash on/off (long-press = power off, task 9)
     {
-        static bool back_was = false, fwd_was = false;
-        bool back_now = (digitalRead(BTN_BACK) == LOW);
-        bool fwd_now  = (digitalRead(BTN_FWD)  == LOW);
-
-        if (back_now != back_was) {
-            if (back_now) ble_keyboard_press(0x2C, 0);  // HID Space, no mods
-            else          ble_keyboard_release();
-            back_was = back_now;
-        }
-        if (fwd_now != fwd_was) {
-            if (fwd_now) ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
-            else         ble_keyboard_release();
-            fwd_was = fwd_now;
-        }
-
-        if (power_pwr_pressed()) {
+        static bool boot_was = false;
+        bool boot_now = (digitalRead(BTN_BOOT) == LOW);
+        if (boot_now && !boot_was) {
             if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
             else                                          ui_cycle_screen();
+        }
+        boot_was = boot_now;
+
+        if (power_pwr_pressed()) {
+            ui_toggle_splash();
         }
     }
 
     handle_rotation_change();
 
-    // Update BLE status on screen when state changes
-    ble_state_t bs = ble_get_state();
-    if (bs != last_ble_state) {
-        last_ble_state = bs;
-        ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
+    // Update WiFi status on screen when state changes
+    net_state_t ns = net_get_state();
+    if (ns != last_net_state) {
+        last_net_state = ns;
+        ui_update_net_status(ns, net_get_ssid(), net_get_ip(), net_get_rssi());
     }
 
     // Update battery indicator
@@ -388,9 +378,9 @@ void loop() {
     // Check for serial commands (screenshot, etc.)
     check_serial_cmd();
 
-    // Process incoming BLE data
-    if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+    // Process incoming HTTP-delivered usage data
+    if (net_has_data()) {
+        if (parse_json(net_get_data(), &usage)) {
             int g_before = usage_rate_group();
             usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();
@@ -400,10 +390,8 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
-            ble_send_ack();
-        } else {
-            ble_send_nack();
         }
+        net_consume_data();
     }
 
     delay(5);

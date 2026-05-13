@@ -11,3 +11,6 @@ firmware/.vscode/
 # Node tooling deps (npm install --no-save)
 tools/node_modules/
 tools/package-lock.json
+
+# Local WiFi credentials — see firmware/src/secrets.example.h
+firmware/src/secrets.h

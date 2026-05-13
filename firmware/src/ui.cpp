@@ -25,13 +25,16 @@ LV_FONT_DECLARE(font_mono_32);
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
 
-// ---- Layout constants for 480x480 (scaled for 2.16" high-DPI + rounded corners) ----
-#define SCR_W         480
-#define SCR_H         480
-#define MARGIN        20    // wider margin for rounded display corners
+// ---- Layout constants for 466x466 round (1.75" AMOLED) ----
+// Inherits the existing 2.16" layout structure pending the round redesign
+// in task 8. Margins widened from 20px to 30px give the centered content
+// enough clearance from the round bezel at 466x466 (~3% smaller than 480).
+#define SCR_W         LCD_WIDTH
+#define SCR_H         LCD_HEIGHT
+#define MARGIN        30    // wider for the round 1.75 panel; corner clip is ~7px
 #define TITLE_Y       30
 #define CONTENT_Y     100
-#define CONTENT_W     (SCR_W - 2 * MARGIN)   // 440
+#define CONTENT_W     (SCR_W - 2 * MARGIN)
 
 // ---- Usage screen widgets ----
 static lv_obj_t* usage_container;
@@ -46,11 +49,12 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* lbl_anim;
 
-// ---- Bluetooth screen widgets ----
-static lv_obj_t* ble_container;
-static lv_obj_t* lbl_ble_status;
-static lv_obj_t* lbl_ble_device;
-static lv_obj_t* lbl_ble_mac;
+// ---- Network screen widgets ----
+static lv_obj_t* net_container;
+static lv_obj_t* lbl_net_status;
+static lv_obj_t* lbl_net_ssid;
+static lv_obj_t* lbl_net_ip;
+static lv_obj_t* lbl_net_rssi;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -138,7 +142,6 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
-static void ble_reset_click_cb(lv_event_t* e);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -279,93 +282,67 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
 }
 
-// ======== Bluetooth Screen (480x480) ========
+// ======== Network Screen ========
+// Square layout inherited from the 2.16 board; full round redesign is task 8.
 
-static void init_bluetooth_screen(lv_obj_t* scr) {
-    ble_container = lv_obj_create(scr);
-    lv_obj_set_size(ble_container, SCR_W, SCR_H);
-    lv_obj_set_pos(ble_container, 0, 0);
-    lv_obj_set_style_bg_opa(ble_container, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ble_container, 0, 0);
-    lv_obj_set_style_pad_all(ble_container, 0, 0);
-    lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_SCROLLABLE);
+static void init_network_screen(lv_obj_t* scr) {
+    net_container = lv_obj_create(scr);
+    lv_obj_set_size(net_container, SCR_W, SCR_H);
+    lv_obj_set_pos(net_container, 0, 0);
+    lv_obj_set_style_bg_opa(net_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(net_container, 0, 0);
+    lv_obj_set_style_pad_all(net_container, 0, 0);
+    lv_obj_clear_flag(net_container, LV_OBJ_FLAG_SCROLLABLE);
 
     // Title
-    lv_obj_t* lbl_ble_title = lv_label_create(ble_container);
-    lv_label_set_text(lbl_ble_title, "Bluetooth");
-    lv_obj_set_style_text_font(lbl_ble_title, &font_tiempos_56, 0);
-    lv_obj_set_style_text_color(lbl_ble_title, COL_TEXT, 0);
-    lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
+    lv_obj_t* lbl_net_title = lv_label_create(net_container);
+    lv_label_set_text(lbl_net_title, "Network");
+    lv_obj_set_style_text_font(lbl_net_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(lbl_net_title, COL_TEXT, 0);
+    lv_obj_align(lbl_net_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 
-    // Info panel (taller for 480x480)
-    lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, 160);
+    // Info panel
+    lv_obj_t* p_info = make_panel(net_container, MARGIN, CONTENT_Y, CONTENT_W, 200);
 
-    // Bluetooth icon + status row
-    static lv_image_dsc_t icon_bt_dsc;
-    init_icon_dsc(&icon_bt_dsc, ICON_BLUETOOTH_W, ICON_BLUETOOTH_H, icon_bluetooth_data);
+    lbl_net_status = lv_label_create(p_info);
+    lv_label_set_text(lbl_net_status, "Connecting...");
+    lv_obj_set_style_text_font(lbl_net_status, &font_styrene_48, 0);
+    lv_obj_set_style_text_color(lbl_net_status, COL_DIM, 0);
+    lv_obj_set_pos(lbl_net_status, 0, 2);
 
-    lv_obj_t* bt_img = lv_image_create(p_info);
-    lv_image_set_src(bt_img, &icon_bt_dsc);
-    lv_obj_set_pos(bt_img, 0, 0);
+    lbl_net_ssid = lv_label_create(p_info);
+    lv_label_set_text(lbl_net_ssid, "SSID: ---");
+    lv_obj_set_style_text_font(lbl_net_ssid, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_net_ssid, COL_DIM, 0);
+    lv_obj_set_pos(lbl_net_ssid, 0, 64);
 
-    lbl_ble_status = lv_label_create(p_info);
-    lv_label_set_text(lbl_ble_status, "Initializing...");
-    lv_obj_set_style_text_font(lbl_ble_status, &font_styrene_48, 0);
-    lv_obj_set_style_text_color(lbl_ble_status, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_status, 56, 2);
+    lbl_net_ip = lv_label_create(p_info);
+    lv_label_set_text(lbl_net_ip, "IP: ---");
+    lv_obj_set_style_text_font(lbl_net_ip, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_net_ip, COL_DIM, 0);
+    lv_obj_set_pos(lbl_net_ip, 0, 100);
 
-    lbl_ble_device = lv_label_create(p_info);
-    lv_label_set_text(lbl_ble_device, "Device: ---");
-    lv_obj_set_style_text_font(lbl_ble_device, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_ble_device, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_device, 0, 64);
-
-    lbl_ble_mac = lv_label_create(p_info);
-    lv_label_set_text(lbl_ble_mac, "Address: ---");
-    lv_obj_set_style_text_font(lbl_ble_mac, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_ble_mac, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_mac, 0, 100);
-
-    // Reset Bluetooth tap zone with trash icon
-    int reset_y = CONTENT_Y + 160 + 16;
-    lv_obj_t* reset_zone = lv_obj_create(ble_container);
-    lv_obj_set_pos(reset_zone, MARGIN, reset_y);
-    lv_obj_set_size(reset_zone, CONTENT_W, 110);
-    lv_obj_set_style_bg_color(reset_zone, COL_PANEL, 0);
-    lv_obj_set_style_bg_opa(reset_zone, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(reset_zone, 8, 0);
-    lv_obj_set_style_border_width(reset_zone, 0, 0);
-    lv_obj_set_style_pad_column(reset_zone, 14, 0);
-    lv_obj_set_flex_flow(reset_zone, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(reset_zone, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(reset_zone, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(reset_zone, ble_reset_click_cb, LV_EVENT_CLICKED, NULL);
-
-    static lv_image_dsc_t icon_trash_dsc;
-    init_icon_dsc(&icon_trash_dsc, ICON_TRASH2_W, ICON_TRASH2_H, icon_trash2_data);
-    lv_obj_t* trash_img = lv_image_create(reset_zone);
-    lv_image_set_src(trash_img, &icon_trash_dsc);
-
-    lv_obj_t* reset_lbl = lv_label_create(reset_zone);
-    lv_label_set_text(reset_lbl, "Reset Bluetooth");
-    lv_obj_set_style_text_font(reset_lbl, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(reset_lbl, COL_DIM, 0);
+    lbl_net_rssi = lv_label_create(p_info);
+    lv_label_set_text(lbl_net_rssi, "RSSI: ---");
+    lv_obj_set_style_text_font(lbl_net_rssi, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_net_rssi, COL_DIM, 0);
+    lv_obj_set_pos(lbl_net_rssi, 0, 136);
 
     // Attribution
-    lv_obj_t* lbl_credit = lv_label_create(ble_container);
+    lv_obj_t* lbl_credit = lv_label_create(net_container);
     lv_label_set_text(lbl_credit, "Built by @hermannbjorgvin");
     lv_obj_set_style_text_font(lbl_credit, &font_styrene_24, 0);
     lv_obj_set_style_text_color(lbl_credit, COL_DIM, 0);
     lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -46);
 
-    lv_obj_t* lbl_credit2 = lv_label_create(ble_container);
+    lv_obj_t* lbl_credit2 = lv_label_create(net_container);
     lv_label_set_text(lbl_credit2, "Clawd animation by @amaanbuilds");
     lv_obj_set_style_text_font(lbl_credit2, &font_styrene_20, 0);
     lv_obj_set_style_text_color(lbl_credit2, COL_DIM, 0);
     lv_obj_align(lbl_credit2, LV_ALIGN_BOTTOM_MID, 0, -20);
 
     // Start hidden
-    lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(net_container, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Public API ========
@@ -384,7 +361,7 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
-    init_bluetooth_screen(scr);
+    init_network_screen(scr);
     splash_init(scr);
 
     // Splash is touch-toggled — tap anywhere on the splash dismisses it
@@ -460,29 +437,22 @@ static void apply_battery_visibility(void) {
 }
 
 // LVGL handles click debouncing internally. Screen-level handler fires when
-// no child consumed the event (children only consume if they have their own
-// event callback, e.g. the Reset Bluetooth zone). On BT screen we skip the
-// splash toggle so only the reset zone is interactive there.
+// no child consumed the event. The splash is the only touch-toggled screen;
+// taps on Usage or Network screens go to splash.
 static void global_click_cb(lv_event_t* e) {
     (void)e;
-    if (ui_get_current_screen() == SCREEN_BLUETOOTH) return;
     ui_toggle_splash();
-}
-
-static void ble_reset_click_cb(lv_event_t* e) {
-    (void)e;
-    ble_clear_bonds();
 }
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(net_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
-    case SCREEN_SPLASH:     splash_show(); break;
-    case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
-    case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_SPLASH:   splash_show(); break;
+    case SCREEN_USAGE:    lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_NETWORK:  lv_obj_clear_flag(net_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
 
@@ -498,7 +468,7 @@ void ui_show_screen(screen_t screen) {
 }
 
 void ui_cycle_screen(void) {
-    screen_t next = (current_screen == SCREEN_USAGE) ? SCREEN_BLUETOOTH : SCREEN_USAGE;
+    screen_t next = (current_screen == SCREEN_USAGE) ? SCREEN_NETWORK : SCREEN_USAGE;
     ui_show_screen(next);
 }
 
@@ -511,36 +481,39 @@ screen_t ui_get_current_screen(void) {
     return current_screen;
 }
 
-void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) {
+void ui_update_net_status(net_state_t state, const char* ssid, const char* ip, int8_t rssi) {
     switch (state) {
-    case BLE_STATE_CONNECTED:
-        lv_label_set_text(lbl_ble_status, "Connected");
-        lv_obj_set_style_text_color(lbl_ble_status, COL_GREEN, 0);
+    case NET_STATE_CONNECTED:
+        lv_label_set_text(lbl_net_status, "Connected");
+        lv_obj_set_style_text_color(lbl_net_status, COL_GREEN, 0);
         break;
-    case BLE_STATE_ADVERTISING:
-        lv_label_set_text(lbl_ble_status, "Advertising...");
-        lv_obj_set_style_text_color(lbl_ble_status, COL_AMBER, 0);
-        break;
-    case BLE_STATE_DISCONNECTED:
-        lv_label_set_text(lbl_ble_status, "Disconnected");
-        lv_obj_set_style_text_color(lbl_ble_status, COL_RED, 0);
+    case NET_STATE_CONNECTING:
+        lv_label_set_text(lbl_net_status, "Connecting...");
+        lv_obj_set_style_text_color(lbl_net_status, COL_AMBER, 0);
         break;
     default:
-        lv_label_set_text(lbl_ble_status, "Initializing...");
-        lv_obj_set_style_text_color(lbl_ble_status, COL_DIM, 0);
+        lv_label_set_text(lbl_net_status, "Disconnected");
+        lv_obj_set_style_text_color(lbl_net_status, COL_RED, 0);
         break;
     }
 
-    if (name) {
-        static char nbuf[48];
-        snprintf(nbuf, sizeof(nbuf), "Device: %s", name);
-        lv_label_set_text(lbl_ble_device, nbuf);
+    if (ssid) {
+        static char sbuf[48];
+        snprintf(sbuf, sizeof(sbuf), "SSID: %s", ssid);
+        lv_label_set_text(lbl_net_ssid, sbuf);
     }
-    if (mac) {
-        static char mbuf[48];
-        snprintf(mbuf, sizeof(mbuf), "Address: %s", mac);
-        lv_label_set_text(lbl_ble_mac, mbuf);
+    if (ip) {
+        static char ibuf[32];
+        snprintf(ibuf, sizeof(ibuf), "IP: %s", ip);
+        lv_label_set_text(lbl_net_ip, ibuf);
     }
+    static char rbuf[16];
+    if (state == NET_STATE_CONNECTED) {
+        snprintf(rbuf, sizeof(rbuf), "RSSI: %d dBm", (int)rssi);
+    } else {
+        snprintf(rbuf, sizeof(rbuf), "RSSI: ---");
+    }
+    lv_label_set_text(lbl_net_rssi, rbuf);
 }
 
 void ui_update_battery(int percent, bool charging) {
