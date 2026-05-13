@@ -24,7 +24,7 @@ static uint8_t accel_to_rotation(float ax, float ay) {
     }
 
     if (abs_ay > abs_ax) {
-        return (ay > 0) ? 3 : 1;
+        return (ay > 0) ? 1 : 3;
     } else {
         return (ax > 0) ? 0 : 2;
     }

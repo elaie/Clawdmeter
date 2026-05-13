@@ -27,8 +27,18 @@ from typing import Any
 
 import requests
 
+from discovery import (
+    discover_first,
+    discover_by_name,
+    resolve_hostname,
+    load_cached_ip,
+    save_cached_ip,
+    clear_cached_ip,
+)
+
 DEFAULT_POLL_INTERVAL_S = 60
 DEFAULT_REQUEST_TIMEOUT_S = 15
+DEFAULT_DISCOVERY_TIMEOUT_S = 6
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
@@ -148,6 +158,65 @@ def post_to_esp32(esp32_ip: str, payload: dict, request_timeout_s: int) -> bool:
     return True
 
 
+def discover_esp32(timeout_s: float = DEFAULT_DISCOVERY_TIMEOUT_S,
+                   device_name: str | None = None) -> str | None:
+    """Find the ESP32 via mDNS. If `device_name` is given, only return a
+    match for that specific device (so multi-clawdmeter LANs are unambiguous).
+
+    Falls back to `<name>.local` (or `clawdmeter.local`) via the OS resolver
+    if service-type browse turns up nothing."""
+    if device_name:
+        log.info("discovering clawdmeter '%s' on the LAN (mDNS, up to %.0fs)...",
+                 device_name, timeout_s)
+        dev = discover_by_name(device_name, timeout_s)
+    else:
+        log.info("discovering any clawdmeter on the LAN (mDNS, up to %.0fs)...", timeout_s)
+        dev = discover_first(timeout_s)
+    if dev:
+        log.info("found '%s' at %s:%d (%s)",
+                 dev.name, dev.ip, dev.port, dev.hostname or "no hostname")
+        return dev.ip
+    fallback_host = f"{device_name}.local" if device_name else "clawdmeter.local"
+    ip = resolve_hostname(fallback_host)
+    if ip:
+        log.info("resolved %s -> %s", fallback_host, ip)
+        return ip
+    if device_name:
+        log.warning("no clawdmeter named '%s' answered", device_name)
+    else:
+        log.warning("no clawdmeter responded to mDNS")
+    return None
+
+
+def resolve_esp32_ip(args_ip: str | None, cfg: dict, cache_dir: Path,
+                     allow_discovery: bool, discovery_timeout_s: float,
+                     device_name: str | None) -> str | None:
+    """Order: explicit IP > cache (only when no name override) > mDNS discovery.
+
+    `device_name` filters discovery to a specific board. When `device_name` is
+    set, the cache is skipped — we always verify by name so we never POST to
+    the wrong board after a board swap."""
+    # 1) Explicit overrides win — user is being intentional.
+    explicit = args_ip or cfg.get("esp32_ip") or os.environ.get("CLAWDMETER_ESP32_IP")
+    if explicit:
+        return explicit
+    if not allow_discovery:
+        return None
+    # 2) Cached address from last successful discovery — but only when no
+    #    name filter is in play. With a name filter, a stale cache could point
+    #    at a different device that took the same IP.
+    if not device_name:
+        cached = load_cached_ip(cache_dir)
+        if cached:
+            log.info("using cached IP %s (from %s)", cached, cache_dir / "discovered.json")
+            return cached
+    # 3) Fresh scan.
+    ip = discover_esp32(discovery_timeout_s, device_name)
+    if ip and not device_name:
+        save_cached_ip(cache_dir, ip)
+    return ip
+
+
 def load_config(path: Path | None) -> dict:
     if not path or not path.exists():
         return {}
@@ -160,10 +229,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", type=Path, default=Path(__file__).with_name("config.json"),
                    help="path to config.json (default: alongside this script)")
     p.add_argument("--esp32-ip", help="override esp32_ip from config")
+    p.add_argument("--device", help="match a specific device by name (the CLAWDMETER_NAME baked into the firmware)")
     p.add_argument("--poll-interval", type=int, help="override poll_interval_s from config")
     p.add_argument("--credentials-path", type=Path, help="override Claude credentials path")
     p.add_argument("--dry-run", action="store_true", help="skip POST to ESP32; just log the payload")
     p.add_argument("--once", action="store_true", help="poll once and exit (useful with --dry-run)")
+    p.add_argument("--no-discovery", action="store_true",
+                   help="disable mDNS auto-discovery (require explicit --esp32-ip / config)")
     p.add_argument("--verbose", "-v", action="store_true")
     return p.parse_args()
 
@@ -186,14 +258,25 @@ def main() -> int:
     )
 
     cfg = load_config(args.config)
-    esp32_ip = args.esp32_ip or cfg.get("esp32_ip") or os.environ.get("CLAWDMETER_ESP32_IP")
+    cache_dir = args.config.parent
     poll_interval_s = args.poll_interval or cfg.get("poll_interval_s") or DEFAULT_POLL_INTERVAL_S
-    creds_path = args.credentials_path or (Path(cfg["credentials_path"]) if "credentials_path" in cfg else default_credentials_path())
+    creds_path = args.credentials_path or (Path(cfg["credentials_path"]) if cfg.get("credentials_path") else default_credentials_path())
     request_timeout_s = cfg.get("request_timeout_s", DEFAULT_REQUEST_TIMEOUT_S)
+    discovery_timeout_s = cfg.get("discovery_timeout_s", DEFAULT_DISCOVERY_TIMEOUT_S)
+    allow_discovery = not args.no_discovery and cfg.get("discovery_enabled", True)
+    device_name = args.device or cfg.get("esp32_name") or os.environ.get("CLAWDMETER_DEVICE")
 
-    if not args.dry_run and not esp32_ip:
-        log.error("esp32_ip is required (set via --esp32-ip, config.json, or CLAWDMETER_ESP32_IP). Pass --dry-run to skip the POST.")
-        return 2
+    esp32_ip = None
+    if not args.dry_run:
+        esp32_ip = resolve_esp32_ip(args.esp32_ip, cfg, cache_dir,
+                                    allow_discovery, discovery_timeout_s,
+                                    device_name)
+        if not esp32_ip:
+            hint = (f"named '{device_name}' " if device_name else "")
+            log.error("could not locate the ESP32 %s— set --esp32-ip / config.json esp32_ip, "
+                      "or run `python discover.py` to see what's on the LAN. "
+                      "Pass --dry-run to skip the POST.", hint)
+            return 2
 
     try:
         token = load_credentials(creds_path)
@@ -209,6 +292,12 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
+    # Re-discover after this many back-to-back POST failures. DHCP renewal /
+    # board swap is the usual cause, so a 30+ second blip earns a fresh scan.
+    REDISCOVER_AFTER_FAILS = 3
+    consecutive_post_fails = 0
+    esp_explicit = bool(args.esp32_ip or cfg.get("esp32_ip") or os.environ.get("CLAWDMETER_ESP32_IP"))
+
     backoff_s = 5
     while not _stop:
         payload = poll_anthropic(token, request_timeout_s)
@@ -222,10 +311,26 @@ def main() -> int:
         log.info("payload: %s", json.dumps(payload))
         if not args.dry_run:
             ok = post_to_esp32(esp32_ip, payload, request_timeout_s)
-            if not ok:
-                # Don't reset poll interval on POST failure — the next poll
-                # will pick up fresh data anyway. Just log and continue.
-                pass
+            if ok:
+                consecutive_post_fails = 0
+            else:
+                consecutive_post_fails += 1
+                # If the user pinned an IP explicitly, respect it — don't
+                # silently flip to a discovered one. Only auto-rediscover
+                # when we picked the IP ourselves (cache or fresh scan).
+                if (allow_discovery and not esp_explicit
+                        and consecutive_post_fails >= REDISCOVER_AFTER_FAILS):
+                    log.info("%d POSTs failed in a row — invalidating cache and rescanning",
+                             consecutive_post_fails)
+                    clear_cached_ip(cache_dir)
+                    new_ip = discover_esp32(discovery_timeout_s, device_name)
+                    if new_ip:
+                        esp32_ip = new_ip
+                        # Only cache when we're not name-pinned — the cache is
+                        # only consulted in the no-name path anyway.
+                        if not device_name:
+                            save_cached_ip(cache_dir, new_ip)
+                        consecutive_post_fails = 0
 
         if args.once:
             return 0

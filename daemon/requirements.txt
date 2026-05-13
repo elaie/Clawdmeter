@@ -1,1 +1,2 @@
 requests>=2.31,<3
+zeroconf>=0.131,<1

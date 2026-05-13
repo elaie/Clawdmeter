@@ -41,12 +41,12 @@ On Windows it'll show up as e.g. `COM5` or `COM7`. If nothing shows up:
 
 ## 3. Flash the firmware
 
-Run from any shell. Replace `COM5` with whatever port you found:
+Run from any shell. Replace `COM3` with whatever port you found:
 
 ```powershell
 & "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run `
     -d "c:\Users\SanskarShrestha\source\repos\Clawdmeter\Clawdmeter-1.75\firmware" `
-    -t upload --upload-port COM5
+    -t upload --upload-port COM3
 ```
 
 Successful upload ends with `Hard resetting via RTS pin...` and the board
@@ -55,7 +55,7 @@ reboots.
 ## 4. Watch the boot log
 
 ```powershell
-& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" device monitor -p COM5 -b 115200
+& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" device monitor -p COM3 -b 115200
 ```
 
 You should see, in order:
@@ -79,12 +79,12 @@ In a separate shell:
 
 ```powershell
 # Status check (the firmware echoes wifi state, ip, rssi, uptime):
-curl http://192.168.x.y/status
+curl.exe http://192.168.50.48/status
 
 # Hand-craft a usage POST to verify the LVGL UI updates:
-curl -X POST http://192.168.x.y/usage `
-    -H "Content-Type: application/json" `
-    -d '{"s":42,"sr":120,"w":18,"wr":7200,"st":"allowed","ok":true}'
+# (assign to variable first — PowerShell mangles single-quoted JSON passed directly to curl.exe)
+$body = '{"s":42,"sr":120,"w":18,"wr":7200,"st":"allowed","ok":true}'
+curl.exe -X POST http://192.168.50.48/usage -H "Content-Type: application/json" -d $body
 ```
 
 The board should respond `{"ok":true}` to the POST. On the device, the

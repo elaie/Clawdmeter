@@ -9,6 +9,7 @@
 #include "imu.h"
 #include "splash.h"
 #include "usage_rate.h"
+#include "wifi_setup.h"
 
 // Physical buttons (Waveshare 1.75 has two):
 //   BTN_BOOT  (GPIO 0)   — short press: cycle screens; on splash, next anim.
@@ -21,7 +22,7 @@ Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
 Arduino_CO5300 *gfx = new Arduino_CO5300(
     bus, LCD_RESET, 0 /* rotation */,
-    LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
+    LCD_WIDTH, LCD_HEIGHT, 6, 0, 6, 0);  // col_offset1=6, col_offset2=6 — Waveshare 1.75" CO5300 visible area starts at col 6
 TouchDrvCST92xx touch;
 XPowersPMU pmu;
 SensorQMI8658 imu;
@@ -247,6 +248,9 @@ void setup() {
         Serial.println("Touch init failed");
     } else {
         touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
+        // Touch on the 1.75 panel needs calibration work — values inherited
+        // from the 2.16 board. Fine for splash dismiss / button cycling, not
+        // precise enough for the keyboard. Left as-is until we calibrate.
         touch.setSwapXY(true);
         touch.setMirrorXY(true, false);
         attachInterrupt(TP_INT, touch_isr, FALLING);
@@ -278,8 +282,11 @@ void setup() {
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, my_touch_cb);
 
-    // Init WiFi STA + HTTP server (POST /usage)
+    // Init WiFi STA + HTTP server (POST /usage). net_init() reads creds
+    // from NVS, falls back to secrets.h, or leaves WiFi off entirely if
+    // neither is available.
     net_init();
+    wifi_setup_init();
 
     // Physical button: BOOT (GPIO 0)
     pinMode(BTN_BOOT, INPUT_PULLUP);
@@ -293,9 +300,16 @@ void setup() {
     // Show initial battery status
     ui_update_battery(power_battery_pct(), power_is_charging());
 
+    // On-device WiFi setup is gated off for now — touch precision on the 1.75
+    // panel isn't reliable enough for the keyboard, so credentials come from
+    // secrets.h (or NVS if anything was previously stored). Re-enable by
+    // restoring the net_has_credentials() branch once touch is calibrated.
     ui_show_screen(SCREEN_SPLASH);
-
-    Serial.println("Dashboard ready, waiting for usage POSTs on WiFi...");
+    if (net_has_credentials()) {
+        Serial.println("Dashboard ready, waiting for usage POSTs on WiFi...");
+    } else {
+        Serial.println("WARN: no WiFi creds in NVS or secrets.h — board will idle");
+    }
 }
 
 static net_state_t last_net_state = NET_STATE_DISCONNECTED;
@@ -334,19 +348,42 @@ void loop() {
     lv_timer_handler();
     ui_tick_anim();
     net_tick();
+    wifi_setup_tick();
+    ui_wifi_setup_tick();
     power_tick();
     imu_tick();
     splash_tick();
 
     // Two-button input (Waveshare 1.75):
-    //   BTN_BOOT (GPIO 0) → cycle screens; on splash, cycle animations
-    //   AXP PWR  (PMU)    → toggle splash on/off (long-press = power off, task 9)
+    //   BTN_BOOT (GPIO 0) short-press  → cycle screens; on splash, cycle animations
+    //   BTN_BOOT (GPIO 0) long-press   → cycle usage layout (only on SCREEN_USAGE)
+    //   AXP PWR  (PMU)    short-press  → toggle splash on/off
+    //   AXP PWR  (PMU)    long-press   → power off
+    #define BOOT_LONG_MS 800
     {
         static bool boot_was = false;
+        static uint32_t boot_press_ms = 0;
+        static bool boot_long_fired = false;
         bool boot_now = (digitalRead(BTN_BOOT) == LOW);
+
         if (boot_now && !boot_was) {
-            if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-            else                                          ui_cycle_screen();
+            // falling edge — start tracking
+            boot_press_ms = millis();
+            boot_long_fired = false;
+        } else if (boot_now && boot_was) {
+            // held — fire long-press exactly once when threshold crossed
+            if (!boot_long_fired && (millis() - boot_press_ms >= BOOT_LONG_MS)) {
+                boot_long_fired = true;
+                if (ui_get_current_screen() == SCREEN_USAGE) {
+                    ui_cycle_usage_layout();
+                }
+            }
+        } else if (!boot_now && boot_was) {
+            // rising edge — fire short-press only if long didn't fire
+            if (!boot_long_fired) {
+                if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
+                else                                          ui_cycle_screen();
+            }
         }
         boot_was = boot_now;
 

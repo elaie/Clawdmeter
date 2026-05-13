@@ -1,6 +1,9 @@
 {
-    "esp32_ip": "192.168.1.42",
+    "esp32_ip": null,
+    "esp32_name": null,
     "poll_interval_s": 60,
     "request_timeout_s": 15,
-    "credentials_path": null
+    "credentials_path": null,
+    "discovery_enabled": true,
+    "discovery_timeout_s": 6
 }
