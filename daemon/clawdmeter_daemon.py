@@ -39,6 +39,7 @@ from discovery import (
 DEFAULT_POLL_INTERVAL_S = 60
 DEFAULT_REQUEST_TIMEOUT_S = 15
 DEFAULT_DISCOVERY_TIMEOUT_S = 6
+DEFAULT_ACTIVE_SESSION_WINDOW_S = 300  # JSONL mtime within last 5 min ⇒ "active"
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
@@ -47,6 +48,33 @@ log = logging.getLogger("clawdmeter")
 
 def default_credentials_path() -> Path:
     return Path.home() / ".claude" / ".credentials.json"
+
+
+def default_projects_dir() -> Path:
+    return Path.home() / ".claude" / "projects"
+
+
+def count_active_sessions(projects_dir: Path, window_s: int) -> int:
+    """Count Claude Code sessions touched within the last `window_s` seconds.
+
+    Each conversation is a JSONL appended to as the session progresses, so a
+    recent mtime means the user (or Claude Code) wrote to it recently. -1 if
+    the projects dir doesn't exist yet (fresh install / never used)."""
+    if not projects_dir.exists():
+        return -1
+    cutoff = time.time() - window_s
+    n = 0
+    try:
+        for jsonl in projects_dir.glob("*/*.jsonl"):
+            try:
+                if jsonl.stat().st_mtime >= cutoff:
+                    n += 1
+            except OSError:
+                continue
+    except OSError as e:
+        log.warning("active session scan failed: %s", e)
+        return -1
+    return n
 
 
 def load_credentials(path: Path) -> str:
@@ -80,7 +108,8 @@ def _find_key(node: Any, key: str) -> Any:
     return None
 
 
-def poll_anthropic(token: str, request_timeout_s: int) -> dict | None:
+def poll_anthropic(token: str, request_timeout_s: int,
+                   projects_dir: Path, active_window_s: int) -> dict | None:
     """Probe Anthropic with a 1-token Haiku call. Returns the payload dict to
     POST to the ESP32, or None on transport failure."""
     headers = {
@@ -141,6 +170,7 @@ def poll_anthropic(token: str, request_timeout_s: int) -> dict | None:
         "w": round(s7d_util * 100, 1),
         "wr": wr_min,
         "st": status,
+        "as": count_active_sessions(projects_dir, active_window_s),
         "ok": True,
     }
 
@@ -265,6 +295,8 @@ def main() -> int:
     discovery_timeout_s = cfg.get("discovery_timeout_s", DEFAULT_DISCOVERY_TIMEOUT_S)
     allow_discovery = not args.no_discovery and cfg.get("discovery_enabled", True)
     device_name = args.device or cfg.get("esp32_name") or os.environ.get("CLAWDMETER_DEVICE")
+    projects_dir = Path(cfg["projects_dir"]) if cfg.get("projects_dir") else default_projects_dir()
+    active_window_s = cfg.get("active_session_window_s", DEFAULT_ACTIVE_SESSION_WINDOW_S)
 
     esp32_ip = None
     if not args.dry_run:
@@ -300,7 +332,7 @@ def main() -> int:
 
     backoff_s = 5
     while not _stop:
-        payload = poll_anthropic(token, request_timeout_s)
+        payload = poll_anthropic(token, request_timeout_s, projects_dir, active_window_s)
         if payload is None:
             log.info("retry in %ds", backoff_s)
             _sleep_interruptible(backoff_s)

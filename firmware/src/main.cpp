@@ -168,6 +168,7 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
+    out->active_sessions = doc["as"] | -1;
     out->ok = doc["ok"] | false;
     out->valid = true;
     return true;

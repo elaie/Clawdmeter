@@ -4,6 +4,8 @@
     "poll_interval_s": 60,
     "request_timeout_s": 15,
     "credentials_path": null,
+    "projects_dir": null,
+    "active_session_window_s": 300,
     "discovery_enabled": true,
     "discovery_timeout_s": 6
 }

@@ -66,6 +66,7 @@ static lv_obj_t* lc_arc_session;
 static lv_obj_t* lc_lbl_session;   // huge center %
 static lv_obj_t* lc_lbl_sreset;    // "Resets in …"
 static lv_obj_t* lc_pill_weekly;   // "W 18%" pill at bottom
+static lv_obj_t* lc_lbl_sessions;  // "N active" — Claude Code sessions in flight
 
 // ---- Network screen widgets ----
 static lv_obj_t* net_container;
@@ -101,7 +102,11 @@ static lv_image_dsc_t battery_dscs[5];
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
 static screen_t current_screen = SCREEN_USAGE;
-static usage_layout_t current_usage_layout = USAGE_LAYOUT_B_HALVES;
+static usage_layout_t current_usage_layout = USAGE_LAYOUT_C_DOMINANT;
+// Flipped by ui_update() once we receive a valid payload that explicitly says
+// active_sessions == 0. Defaults to true so the animation is visible during
+// the first-boot / no-data window instead of falsely going quiet.
+static bool g_show_anim = true;
 
 // Animation state
 static uint32_t anim_last_ms = 0;
@@ -427,6 +432,15 @@ static void init_layout_c(lv_obj_t* parent) {
     lc_pill_weekly = make_pill(lc_root, "W ---%");
     lv_obj_align(lc_pill_weekly, LV_ALIGN_CENTER, 0, 60);
     lv_obj_add_flag(lc_pill_weekly, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    // Active Claude Code sessions — sits below the weekly pill, above the
+    // shared anim/spinner label that lives on usage_container.
+    lc_lbl_sessions = lv_label_create(lc_root);
+    lv_label_set_text(lc_lbl_sessions, "");
+    lv_obj_set_style_text_font(lc_lbl_sessions, &font_styrene_24, 0);
+    lv_obj_set_style_text_color(lc_lbl_sessions, COL_DIM, 0);
+    lv_obj_align(lc_lbl_sessions, LV_ALIGN_CENTER, 0, 110);
+    lv_obj_add_flag(lc_lbl_sessions, LV_OBJ_FLAG_EVENT_BUBBLE);
 }
 
 // ======== Usage Screen — container + three layouts ========
@@ -441,12 +455,11 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
-    init_layout_b(usage_container);
+    // Layout B (halves) is intentionally not initialized — only the dominant
+    // layout is shown. Long-press cycling is no-op'd in ui_cycle_usage_layout.
+    lb_root = NULL;
     init_layout_c(usage_container);
-
-    // Show only the default layout; hide the rest
-    lv_obj_clear_flag(lb_root, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(lc_root, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(lc_root, LV_OBJ_FLAG_HIDDEN);
 
     // Shared anim/spinner label at the bottom (sits above all layout sub-roots)
     lbl_anim = lv_label_create(usage_container);
@@ -956,22 +969,10 @@ void ui_update(const UsageData* data) {
     int w_pct = (int)(data->weekly_pct + 0.5f);
     lv_color_t s_col = pct_color(data->session_pct);
     lv_color_t w_col = pct_color(data->weekly_pct);
-    bool limited = (strncmp(data->status, "limited", 7) == 0);
 
-    char sreset[48], wreset[48], weekly_line[48];
+    char sreset[48], wreset[48];
     format_reset_time(data->session_reset_mins, sreset, sizeof(sreset));
     format_reset_time(data->weekly_reset_mins, wreset, sizeof(wreset));
-    snprintf(weekly_line, sizeof(weekly_line), "Weekly %d%%", w_pct);
-
-    // ---- Layout B ----
-    lv_arc_set_value(lb_arc_session, s_pct);
-    lv_obj_set_style_arc_color(lb_arc_session, s_col, LV_PART_INDICATOR);
-    lv_arc_set_value(lb_arc_weekly, w_pct);
-    lv_obj_set_style_arc_color(lb_arc_weekly, w_col, LV_PART_INDICATOR);
-    lv_label_set_text_fmt(lb_lbl_session, "%d%%", s_pct);
-    lv_label_set_text(lb_lbl_sreset, sreset);
-    lv_label_set_text_fmt(lb_lbl_weekly, "%d%%", w_pct);
-    lv_label_set_text(lb_lbl_wreset, wreset);
 
     // ---- Layout C ----
     lv_arc_set_value(lc_arc_session, s_pct);
@@ -985,10 +986,26 @@ void ui_update(const UsageData* data) {
         lv_obj_set_style_bg_color(lc_pill_weekly, w_col, 0);
         lv_obj_set_style_text_color(lc_pill_weekly, COL_BG, 0);
     }
+
+    // ---- Active sessions + thinking-animation gating ----
+    int n = data->active_sessions;
+    if (n < 0) {
+        lv_label_set_text(lc_lbl_sessions, "");
+        g_show_anim = true;  // unknown — keep the spinner running
+    } else {
+        lv_label_set_text_fmt(lc_lbl_sessions, "%d active", n);
+        g_show_anim = (n > 0);
+    }
+    if (g_show_anim) {
+        lv_obj_clear_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
+    if (!g_show_anim) return;
 
     uint32_t now = lv_tick_get();
 
@@ -1067,17 +1084,9 @@ void ui_cycle_screen(void) {
 }
 
 void ui_cycle_usage_layout(void) {
-    // Hide current layout root
-    lv_obj_t* roots[USAGE_LAYOUT_COUNT] = { lb_root, lc_root };
-    lv_obj_add_flag(roots[current_usage_layout], LV_OBJ_FLAG_HIDDEN);
-
-    usage_layout_t prev = current_usage_layout;
-    current_usage_layout = (usage_layout_t)((current_usage_layout + 1) % USAGE_LAYOUT_COUNT);
-
-    lv_obj_clear_flag(roots[current_usage_layout], LV_OBJ_FLAG_HIDDEN);
-
-    static const char* const names[] = { "B-halves", "C-dominant" };
-    Serial.printf("usage layout: %s -> %s\n", names[prev], names[current_usage_layout]);
+    // Layout cycling disabled — only the dominant layout is shipped. The
+    // long-press hook in main.cpp still calls this, but it's a no-op.
+    Serial.println("usage layout: cycle ignored (only C-dominant is enabled)");
 }
 
 usage_layout_t ui_get_usage_layout(void) {
